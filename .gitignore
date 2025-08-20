@@ -22,6 +22,8 @@ __pycache__/
 # Python virtual environments
 .venv/
 venv/
+.myenv/
+myenv
 
 # IDE - VSCode
 .vscode/*
