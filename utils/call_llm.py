@@ -46,23 +46,31 @@ def call_llm(prompt: str, use_cache: bool = True) -> str:
             logger.info(f"RESPONSE: {cache[prompt]}")
             return cache[prompt]
 
-    # # Call the LLM if not in cache or cache disabled
-    # client = genai.Client(
-    #     vertexai=True,
-    #     # TODO: change to your own project id and location
-    #     project=os.getenv("GEMINI_PROJECT_ID", "your-project-id"),
-    #     location=os.getenv("GEMINI_LOCATION", "us-central1")
-    # )
+    # Select provider: "openai" or default to "google"
+    provider = os.getenv("LLM_PROVIDER", "google").lower()
+    if provider == "openai":
+        # OpenAI
+        # Env:
+        #   - OPENAI_API_KEY
+        #   - OPENAI_MODEL (default: gpt-4o-mini)
+        from openai import OpenAI
 
-    # You can comment the previous line and use the AI Studio key instead:
-    client = genai.Client(
-        api_key=os.getenv("GEMINI_API_KEY", ""),
-    )
-    # model = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
-    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-    
-    response = client.models.generate_content(model=model, contents=[prompt])
-    response_text = response.text
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        r = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        response_text = r.choices[0].message.content
+    else:
+        # Google Gemini (AI Studio key)
+        client = genai.Client(
+            api_key=os.getenv("GEMINI_API_KEY", ""),
+        )
+        # model = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
+        model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        response = client.models.generate_content(model=model, contents=[prompt])
+        response_text = response.text
 
     # Log the response
     logger.info(f"RESPONSE: {response_text}")
