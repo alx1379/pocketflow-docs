@@ -56,6 +56,7 @@ def main():
     parser.add_argument("--no-cache", action="store_true", help="Disable LLM response caching (default: caching enabled)")
     # Add max_abstraction_num parameter to control the number of abstractions
     parser.add_argument("--max-abstractions", type=int, default=10, help="Maximum number of abstractions to identify (default: 10)")
+    parser.add_argument("--files-limit", type=int, default=None, help="Limit the number of files to include in context (default: None, includes all files). Useful for large codebases.")
 
     args = parser.parse_args()
 
@@ -87,6 +88,9 @@ def main():
         
         # Add max_abstraction_num parameter
         "max_abstraction_num": args.max_abstractions,
+        
+        # Add files_limit parameter (None means no limit)
+        "files_limit": args.files_limit,
 
         # Outputs will be populated by the nodes
         "files": [],

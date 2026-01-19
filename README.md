@@ -1,3 +1,7 @@
+python main.py --dir ../../TIBURON/ml-back/app --include "*.py" --exclude "*test*" --language "Russian"
+
+python main.py --dir ../../TIBURON/ml-front/src --include "*.*" --language "Russian"
+
 <h1 align="center">Turns Codebase into Easy Tutorial with AI</h1>
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)

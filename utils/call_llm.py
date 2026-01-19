@@ -27,6 +27,96 @@ cache_file = "llm_cache.json"
 
 # By default, we Google Gemini 2.5 pro, as it shows great performance for code understanding
 def call_llm(prompt: str, use_cache: bool = True) -> str:
+    def get_limit_chars(provider_name: str) -> int:
+        # Allow override
+        env_val = os.getenv("LLM_MAX_PROMPT_CHARS")
+        if env_val:
+            try:
+                return int(env_val)
+            except:
+                pass
+        # Conservative defaults (chars ~ tokens*4)
+        if provider_name == "openai":
+            # 128k tokens -> ~512k chars; keep headroom
+            return 350_000
+        # Gemini 2.5 models can support very large contexts; keep a high cap
+        return 1_200_000
+
+    def get_chunk_size_chars(provider_name: str) -> int:
+        env_val = os.getenv("LLM_CHUNK_SIZE_CHARS")
+        if env_val:
+            try:
+                return int(env_val)
+            except:
+                pass
+        # Keep per-request payloads well under limits
+        if provider_name == "openai":
+            return 120_000
+        return 300_000
+
+    def summarize_chunks_openai(text: str, client, model: str, max_chars: int) -> str:
+        chunk_size = get_chunk_size_chars("openai")
+        summaries = []
+        instruction = (
+            "You will compress a large, technical context for downstream analysis.\n"
+            "Requirements:\n"
+            "- Preserve key APIs, function/class names, file paths, and important code lines\n"
+            "- Keep crucial semantics; remove boilerplate and repeated sections\n"
+            "- Output concise plain text (no YAML fences)\n"
+        )
+        for i in range(0, len(text), chunk_size):
+            chunk = text[i : i + chunk_size]
+            r = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": instruction},
+                    {"role": "user", "content": f"Compress this chunk:\n{chunk}"},
+                ],
+            )
+            summaries.append(r.choices[0].message.content.strip())
+        combined = "\n\n".join(summaries)
+        # Iteratively reduce if still too big
+        reduce_round = 0
+        while len(combined) > max_chars and reduce_round < 3:
+            reduce_round += 1
+            r = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": instruction},
+                    {"role": "user", "content": f"Further compress while preserving technical fidelity:\n{combined}"},
+                ],
+            )
+            combined = r.choices[0].message.content.strip()
+        return combined
+
+    def summarize_chunks_google(text: str, client, model: str, max_chars: int) -> str:
+        chunk_size = get_chunk_size_chars("google")
+        summaries = []
+        instruction = (
+            "You will compress a large, technical context for downstream analysis.\n"
+            "Requirements:\n"
+            "- Preserve key APIs, function/class names, file paths, and important code lines\n"
+            "- Keep crucial semantics; remove boilerplate and repeated sections\n"
+            "- Output concise plain text (no YAML fences)\n"
+        )
+        for i in range(0, len(text), chunk_size):
+            chunk = text[i : i + chunk_size]
+            resp = client.models.generate_content(
+                model=model,
+                contents=[instruction, f"Compress this chunk:\n{chunk}"],
+            )
+            summaries.append(resp.text.strip())
+        combined = "\n\n".join(summaries)
+        reduce_round = 0
+        while len(combined) > max_chars and reduce_round < 3:
+            reduce_round += 1
+            resp = client.models.generate_content(
+                model=model,
+                contents=[instruction, f"Further compress while preserving technical fidelity:\n{combined}"],
+            )
+            combined = resp.text.strip()
+        return combined
+
     # Log the prompt
     logger.info(f"PROMPT: {prompt}")
 
@@ -54,14 +144,33 @@ def call_llm(prompt: str, use_cache: bool = True) -> str:
         #   - OPENAI_API_KEY
         #   - OPENAI_MODEL (default: gpt-4o-mini)
         from openai import OpenAI
+        from openai import BadRequestError
 
         client = OpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
         model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-        r = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        response_text = r.choices[0].message.content
+        max_chars = get_limit_chars("openai")
+        effective_prompt = prompt
+        if len(effective_prompt) > max_chars:
+            logger.info(f"Prompt length {len(effective_prompt)} exceeds OpenAI limit ~{max_chars} chars; compressing...")
+            effective_prompt = summarize_chunks_openai(effective_prompt, client, model, max_chars)
+        try:
+            r = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": effective_prompt}],
+            )
+            response_text = r.choices[0].message.content
+        except BadRequestError as e:
+            # Fallback if context limit still exceeded due to tokenization overhead
+            if "context length" in str(e).lower():
+                logger.warning("Context length exceeded; applying additional compression and retrying once.")
+                effective_prompt = summarize_chunks_openai(effective_prompt, client, model, max_chars // 2)
+                r = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": effective_prompt}],
+                )
+                response_text = r.choices[0].message.content
+            else:
+                raise
     else:
         # Google Gemini (AI Studio key)
         client = genai.Client(
@@ -69,7 +178,12 @@ def call_llm(prompt: str, use_cache: bool = True) -> str:
         )
         # model = os.getenv("GEMINI_MODEL", "gemini-2.5-pro")
         model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-        response = client.models.generate_content(model=model, contents=[prompt])
+        max_chars = get_limit_chars("google")
+        effective_prompt = prompt
+        if len(effective_prompt) > max_chars:
+            logger.info(f"Prompt length {len(effective_prompt)} exceeds Gemini safe cap ~{max_chars} chars; compressing...")
+            effective_prompt = summarize_chunks_google(effective_prompt, client, model, max_chars)
+        response = client.models.generate_content(model=model, contents=[effective_prompt])
         response_text = response.text
 
     # Log the response

@@ -19,6 +19,75 @@ def get_content_for_indices(files_data, indices):
     return content_map
 
 
+# Helper to extract YAML from LLM response with robust error handling
+def extract_yaml_from_response(response, context_name="response"):
+    """
+    Extract YAML content from LLM response.
+    Tries multiple strategies:
+    1. Look for ```yaml code blocks
+    2. Look for ``` code blocks (any language)
+    3. Try parsing the entire response as YAML
+    """
+    response = response.strip()
+    
+    # Strategy 1: Look for ```yaml blocks
+    if "```yaml" in response:
+        try:
+            parts = response.split("```yaml")
+            if len(parts) > 1:
+                yaml_part = parts[1].split("```")[0].strip()
+                if yaml_part:
+                    return yaml_part
+        except (IndexError, ValueError):
+            pass
+    
+    # Strategy 2: Look for any ``` code blocks
+    if "```" in response:
+        try:
+            # Try to find code blocks with yaml-like content
+            parts = response.split("```")
+            for i in range(1, len(parts), 2):  # Every other part after first is code
+                if i < len(parts):
+                    code_block = parts[i].strip()
+                    # Skip language identifier if present (first line)
+                    lines = code_block.split('\n')
+                    if len(lines) > 1 and lines[0].strip().lower() in ['yaml', 'yml']:
+                        code_block = '\n'.join(lines[1:]).strip()
+                    elif len(lines) == 1 and lines[0].strip().lower() in ['yaml', 'yml']:
+                        continue  # Skip if only language identifier
+                    if code_block and (code_block.startswith('-') or code_block.startswith('{')):
+                        return code_block
+        except (IndexError, ValueError):
+            pass
+    
+    # Strategy 3: Try parsing the entire response as YAML
+    # Remove any leading/trailing markdown formatting
+    cleaned = response
+    # Remove markdown headers if present
+    lines = cleaned.split('\n')
+    cleaned_lines = []
+    in_code_block = False
+    for line in lines:
+        if line.strip().startswith('```'):
+            in_code_block = not in_code_block
+            continue
+        if not in_code_block:
+            cleaned_lines.append(line)
+    
+    cleaned = '\n'.join(cleaned_lines).strip()
+    
+    # If it looks like YAML (starts with - or { or key:), try it
+    if cleaned.startswith('-') or cleaned.startswith('{') or ':' in cleaned.split('\n')[0]:
+        return cleaned
+    
+    # If all strategies fail, raise a helpful error
+    error_msg = f"Could not extract YAML from {context_name}. Response format:\n"
+    error_msg += f"First 500 chars: {response[:500]}\n"
+    error_msg += f"Last 200 chars: {response[-200:]}\n"
+    error_msg += "\nExpected format: ```yaml\n...\n```"
+    raise ValueError(error_msg)
+
+
 class FetchRepo(Node):
     def prep(self, shared):
         repo_url = shared.get("repo_url")
@@ -88,16 +157,32 @@ class IdentifyAbstractions(Node):
         language = shared.get("language", "english")  # Get language
         use_cache = shared.get("use_cache", True)  # Get use_cache flag, default to True
         max_abstraction_num = shared.get("max_abstraction_num", 10)  # Get max_abstraction_num, default to 10
+        # Context limits (configurable)
+        context_max_chars = shared.get("context_max_chars", int(os.getenv("CONTEXT_MAX_CHARS", "350000")))
+        per_file_max_chars = shared.get("per_file_max_chars", int(os.getenv("PER_FILE_MAX_CHARS", "6000")))
+        files_limit = shared.get("files_limit", None)
 
         # Helper to create context from files, respecting limits (basic example)
         def create_llm_context(files_data):
-            context = ""
+            context_parts = []
+            total_chars = 0
             file_info = []  # Store tuples of (index, path)
-            for i, (path, content) in enumerate(files_data):
-                entry = f"--- File Index {i}: {path} ---\n{content}\n\n"
-                context += entry
+            iter_items = enumerate(files_data)
+            if isinstance(files_limit, int) and files_limit > 0:
+                iter_items = list(iter_items)[:files_limit]
+            for i, (path, content) in iter_items:
+                # Truncate individual file content
+                truncated = content if len(content) <= per_file_max_chars else content[:per_file_max_chars]
+                entry = f"--- File Index {i}: {path} ---\n{truncated}\n\n"
+                entry_len = len(entry)
+                if total_chars + entry_len > context_max_chars:
+                    # Stop adding more content when reaching cap
+                    break
+                context_parts.append(entry)
+                total_chars += entry_len
                 file_info.append((i, path))
-
+            context = "".join(context_parts)
+            print(f"Context built with {len(file_info)} files, {total_chars} chars (cap {context_max_chars}).")
             return context, file_info  # file_info is list of (index, path)
 
         context, file_info = create_llm_context(files_data)
@@ -113,6 +198,8 @@ class IdentifyAbstractions(Node):
             language,
             use_cache,
             max_abstraction_num,
+            context_max_chars,
+            per_file_max_chars,
         )  # Return all parameters
 
     def exec(self, prep_res):
@@ -124,6 +211,8 @@ class IdentifyAbstractions(Node):
             language,
             use_cache,
             max_abstraction_num,
+            _context_max_chars,
+            _per_file_max_chars,
         ) = prep_res  # Unpack all parameters
         print(f"Identifying abstractions using LLM...")
 
@@ -176,7 +265,7 @@ Format the output as a YAML list of dictionaries:
         response = call_llm(prompt, use_cache=(use_cache and self.cur_retry == 0))  # Use cache only if enabled and not retrying
 
         # --- Validation ---
-        yaml_str = response.strip().split("```yaml")[1].split("```")[0].strip()
+        yaml_str = extract_yaml_from_response(response, "IdentifyAbstractions response")
         abstractions = yaml.safe_load(yaml_str)
 
         if not isinstance(abstractions, list):
@@ -246,6 +335,9 @@ class AnalyzeRelationships(Node):
         project_name = shared["project_name"]  # Get project name
         language = shared.get("language", "english")  # Get language
         use_cache = shared.get("use_cache", True)  # Get use_cache flag, default to True
+        # Limits
+        per_file_max_chars = shared.get("per_file_max_chars", int(os.getenv("PER_FILE_MAX_CHARS", "6000")))
+        rel_context_max_chars = shared.get("relationships_context_max_chars", int(os.getenv("REL_CONTEXT_MAX_CHARS", "300000")))
 
         # Get the actual number of abstractions directly
         num_abstractions = len(abstractions)
@@ -270,11 +362,17 @@ class AnalyzeRelationships(Node):
         relevant_files_content_map = get_content_for_indices(
             files_data, sorted(list(all_relevant_indices))
         )
-        # Format file content for context
-        file_context_str = "\\n\\n".join(
-            f"--- File: {idx_path} ---\\n{content}"
-            for idx_path, content in relevant_files_content_map.items()
-        )
+        # Format file content for context with truncation and cap
+        context_parts = []
+        total_len = 0
+        for idx_path, content in relevant_files_content_map.items():
+            truncated = content if len(content) <= per_file_max_chars else content[:per_file_max_chars]
+            entry = f"--- File: {idx_path} ---\\n{truncated}"
+            if total_len + len(entry) > rel_context_max_chars:
+                break
+            context_parts.append(entry)
+            total_len += len(entry)
+        file_context_str = "\\n\\n".join(context_parts)
         context += file_context_str
 
         return (
@@ -284,6 +382,8 @@ class AnalyzeRelationships(Node):
             project_name,
             language,
             use_cache,
+            per_file_max_chars,
+            rel_context_max_chars,
         )  # Return use_cache
 
     def exec(self, prep_res):
@@ -294,7 +394,9 @@ class AnalyzeRelationships(Node):
             project_name,
             language,
             use_cache,
-         ) = prep_res  # Unpack use_cache
+            _per_file_max_chars,
+            _rel_context_max_chars,
+        ) = prep_res  # Unpack use_cache
         print(f"Analyzing relationships using LLM...")
 
         # Add language instruction and hints only if not English
@@ -347,7 +449,7 @@ Now, provide the YAML output:
         response = call_llm(prompt, use_cache=(use_cache and self.cur_retry == 0)) # Use cache only if enabled and not retrying
 
         # --- Validation ---
-        yaml_str = response.strip().split("```yaml")[1].split("```")[0].strip()
+        yaml_str = extract_yaml_from_response(response, "AnalyzeRelationships response")
         relationships_data = yaml.safe_load(yaml_str)
 
         if not isinstance(relationships_data, dict) or not all(
@@ -489,7 +591,7 @@ Now, provide the YAML output:
         response = call_llm(prompt, use_cache=(use_cache and self.cur_retry == 0)) # Use cache only if enabled and not retrying
 
         # --- Validation ---
-        yaml_str = response.strip().split("```yaml")[1].split("```")[0].strip()
+        yaml_str = extract_yaml_from_response(response, "OrderChapters response")
         ordered_indices_raw = yaml.safe_load(yaml_str)
 
         if not isinstance(ordered_indices_raw, list):
@@ -544,6 +646,8 @@ class WriteChapters(BatchNode):
         project_name = shared["project_name"]
         language = shared.get("language", "english")
         use_cache = shared.get("use_cache", True)  # Get use_cache flag, default to True
+        per_file_max_chars = shared.get("per_file_max_chars", int(os.getenv("PER_FILE_MAX_CHARS", "6000")))
+        chapter_context_max_chars = shared.get("chapter_context_max_chars", int(os.getenv("CHAPTER_CONTEXT_MAX_CHARS", "200000")))
 
         # Get already written chapters to provide context
         # We store them temporarily during the batch run, not in shared memory yet
@@ -616,6 +720,8 @@ class WriteChapters(BatchNode):
                         "next_chapter": next_chapter,  # Add next chapter info (uses potentially translated name)
                         "language": language,  # Add language for multi-language support
                         "use_cache": use_cache, # Pass use_cache flag
+                        "per_file_max_chars": per_file_max_chars,
+                        "chapter_context_max_chars": chapter_context_max_chars,
                         # previous_chapters_summary will be added dynamically in exec
                     }
                 )
@@ -639,13 +745,21 @@ class WriteChapters(BatchNode):
         project_name = item.get("project_name")
         language = item.get("language", "english")
         use_cache = item.get("use_cache", True) # Read use_cache from item
+        per_file_max_chars = item.get("per_file_max_chars", 6000)
+        chapter_context_max_chars = item.get("chapter_context_max_chars", 200000)
         print(f"Writing chapter {chapter_num} for: {abstraction_name} using LLM...")
 
         # Prepare file context string from the map
-        file_context_str = "\n\n".join(
-            f"--- File: {idx_path.split('# ')[1] if '# ' in idx_path else idx_path} ---\n{content}"
-            for idx_path, content in item["related_files_content_map"].items()
-        )
+        parts = []
+        total_len = 0
+        for idx_path, content in item["related_files_content_map"].items():
+            truncated = content if len(content) <= per_file_max_chars else content[:per_file_max_chars]
+            entry = f"--- File: {idx_path.split('# ')[1] if '# ' in idx_path else idx_path} ---\n{truncated}"
+            if total_len + len(entry) > chapter_context_max_chars:
+                break
+            parts.append(entry)
+            total_len += len(entry)
+        file_context_str = "\n\n".join(parts)
 
         # Get summary of chapters written *before* this one
         # Use the temporary instance variable
