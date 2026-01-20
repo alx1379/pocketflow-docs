@@ -19,6 +19,59 @@ def get_content_for_indices(files_data, indices):
     return content_map
 
 
+# Helper to extract project documentation files
+def extract_project_docs(files_data, max_total_size=10000):
+    """
+    Extract project documentation files from crawled files.
+    Priority order: PROJECT.md, DESCRIPTION.md, README.md, ABOUT.md
+    
+    Args:
+        files_data: List of (path, content) tuples
+        max_total_size: Maximum combined size in characters (default: 10000)
+    
+    Returns:
+        Dictionary mapping filename to content, e.g., {"README.md": "...", "PROJECT.md": "..."}
+    """
+    # Priority order for project documentation files
+    doc_priority = ["PROJECT.md", "DESCRIPTION.md", "README.md", "ABOUT.md"]
+    
+    # Normalize paths for matching (handle case-insensitive and path separators)
+    files_by_name = {}
+    for path, content in files_data:
+        # Get just the filename
+        filename = os.path.basename(path)
+        # Normalize to uppercase for case-insensitive matching
+        filename_upper = filename.upper()
+        # Store with original filename as key
+        if filename_upper not in files_by_name:
+            files_by_name[filename_upper] = (filename, path, content)
+    
+    project_docs = {}
+    total_size = 0
+    
+    # Extract docs in priority order
+    for priority_doc in doc_priority:
+        doc_upper = priority_doc.upper()
+        if doc_upper in files_by_name:
+            filename, path, content = files_by_name[doc_upper]
+            content_size = len(content)
+            
+            # Check if adding this doc would exceed the limit
+            if total_size + content_size > max_total_size:
+                # Truncate if needed
+                remaining = max_total_size - total_size
+                if remaining > 100:  # Only add if we have meaningful space
+                    content = content[:remaining] + "\n\n[... truncated ...]"
+                    project_docs[filename] = content
+                    total_size = max_total_size
+                break
+            
+            project_docs[filename] = content
+            total_size += content_size
+    
+    return project_docs
+
+
 # Helper to extract YAML from LLM response with robust error handling
 def extract_yaml_from_response(response, context_name="response"):
     """
@@ -148,6 +201,15 @@ class FetchRepo(Node):
 
     def post(self, shared, prep_res, exec_res):
         shared["files"] = exec_res  # List of (path, content) tuples
+        
+        # Extract project documentation files
+        project_docs = extract_project_docs(exec_res)
+        if project_docs:
+            shared["project_docs"] = project_docs
+            print(f"Extracted project documentation from {len(project_docs)} file(s): {', '.join(project_docs.keys())}")
+        else:
+            shared["project_docs"] = {}
+            print("No project documentation files found (PROJECT.md, DESCRIPTION.md, README.md, ABOUT.md)")
 
 
 class IdentifyAbstractions(Node):
@@ -190,6 +252,17 @@ class IdentifyAbstractions(Node):
         file_listing_for_prompt = "\n".join(
             [f"- {idx} # {path}" for idx, path in file_info]
         )
+        
+        # Get project documentation
+        project_docs = shared.get("project_docs", {})
+        # Format project docs for prompt
+        project_docs_content = ""
+        if project_docs:
+            docs_parts = []
+            for doc_name, doc_content in project_docs.items():
+                docs_parts.append(f"=== {doc_name} ===\n{doc_content}\n")
+            project_docs_content = "\n".join(docs_parts)
+        
         return (
             context,
             file_listing_for_prompt,
@@ -200,6 +273,7 @@ class IdentifyAbstractions(Node):
             max_abstraction_num,
             context_max_chars,
             per_file_max_chars,
+            project_docs_content,
         )  # Return all parameters
 
     def exec(self, prep_res):
@@ -213,6 +287,7 @@ class IdentifyAbstractions(Node):
             max_abstraction_num,
             _context_max_chars,
             _per_file_max_chars,
+            project_docs_content,
         ) = prep_res  # Unpack all parameters
         print(f"Identifying abstractions using LLM...")
 
@@ -226,9 +301,20 @@ class IdentifyAbstractions(Node):
             name_lang_hint = f" (value in {language.capitalize()})"
             desc_lang_hint = f" (value in {language.capitalize()})"
 
+        # Build project documentation section for prompt
+        project_docs_section = ""
+        if project_docs_content:
+            project_docs_section = f"""
+Project Documentation Context:
+{project_docs_content}
+
+IMPORTANT: Use terminology and concepts from the project documentation above when identifying abstractions. 
+The project's actual purpose and domain should guide your abstraction identification.
+"""
+
         prompt = f"""
 For the project `{project_name}`:
-
+{project_docs_section}
 Codebase Context:
 {context}
 
@@ -375,6 +461,16 @@ class AnalyzeRelationships(Node):
         file_context_str = "\\n\\n".join(context_parts)
         context += file_context_str
 
+        # Get project documentation
+        project_docs = shared.get("project_docs", {})
+        # Format project docs for prompt
+        project_docs_content = ""
+        if project_docs:
+            docs_parts = []
+            for doc_name, doc_content in project_docs.items():
+                docs_parts.append(f"=== {doc_name} ===\n{doc_content}\n")
+            project_docs_content = "\n".join(docs_parts)
+
         return (
             context,
             "\n".join(abstraction_info_for_prompt),
@@ -384,6 +480,7 @@ class AnalyzeRelationships(Node):
             use_cache,
             per_file_max_chars,
             rel_context_max_chars,
+            project_docs_content,
         )  # Return use_cache
 
     def exec(self, prep_res):
@@ -396,6 +493,7 @@ class AnalyzeRelationships(Node):
             use_cache,
             _per_file_max_chars,
             _rel_context_max_chars,
+            project_docs_content,
         ) = prep_res  # Unpack use_cache
         print(f"Analyzing relationships using LLM...")
 
@@ -408,9 +506,20 @@ class AnalyzeRelationships(Node):
             lang_hint = f" (in {language.capitalize()})"
             list_lang_note = f" (Names might be in {language.capitalize()})"  # Note for the input list
 
+        # Build project documentation section for prompt
+        project_docs_section = ""
+        if project_docs_content:
+            project_docs_section = f"""
+Project Documentation:
+{project_docs_content}
+
+CRITICAL: The project summary MUST reflect the actual purpose described in the project documentation above, not generic code structure. Use the exact terminology and domain concepts from the documentation. The summary should describe what the project actually does (its real-world purpose and use cases), not just its technical architecture.
+
+"""
+
         prompt = f"""
 Based on the following abstractions and relevant code snippets from the project `{project_name}`:
-
+{project_docs_section}
 List of Abstraction Indices and Names{list_lang_note}:
 {abstraction_listing}
 
@@ -682,6 +791,16 @@ class WriteChapters(BatchNode):
         # Create a formatted string with all chapters
         full_chapter_listing = "\n".join(all_chapters)
 
+        # Get project documentation
+        project_docs = shared.get("project_docs", {})
+        # Format project docs for prompt
+        project_docs_content = ""
+        if project_docs:
+            docs_parts = []
+            for doc_name, doc_content in project_docs.items():
+                docs_parts.append(f"=== {doc_name} ===\n{doc_content}\n")
+            project_docs_content = "\n".join(docs_parts)
+
         items_to_process = []
         for i, abstraction_index in enumerate(chapter_order):
             if 0 <= abstraction_index < len(abstractions):
@@ -722,6 +841,7 @@ class WriteChapters(BatchNode):
                         "use_cache": use_cache, # Pass use_cache flag
                         "per_file_max_chars": per_file_max_chars,
                         "chapter_context_max_chars": chapter_context_max_chars,
+                        "project_docs_content": project_docs_content,  # Add project documentation
                         # previous_chapters_summary will be added dynamically in exec
                     }
                 )
@@ -747,6 +867,7 @@ class WriteChapters(BatchNode):
         use_cache = item.get("use_cache", True) # Read use_cache from item
         per_file_max_chars = item.get("per_file_max_chars", 6000)
         chapter_context_max_chars = item.get("chapter_context_max_chars", 200000)
+        project_docs_content = item.get("project_docs_content", "")
         print(f"Writing chapter {chapter_num} for: {abstraction_name} using LLM...")
 
         # Prepare file context string from the map
@@ -789,9 +910,21 @@ class WriteChapters(BatchNode):
             )
             tone_note = f" (appropriate for {lang_cap} readers)"
 
+        # Build project documentation section for prompt
+        project_docs_section = ""
+        if project_docs_content:
+            project_docs_section = f"""
+Project Documentation Context:
+{project_docs_content}
+
+IMPORTANT: Use terminology and domain concepts from the project documentation above throughout this chapter. 
+Ensure all explanations align with the actual project purpose and use cases described in the documentation.
+
+"""
+
         prompt = f"""
 {language_instruction}Write a very beginner-friendly tutorial chapter (in Markdown format) for the project `{project_name}` about the concept: "{abstraction_name}". This is Chapter {chapter_num}.
-
+{project_docs_section}
 Concept Details{concept_details_note}:
 - Name: {abstraction_name}
 - Description:
@@ -886,12 +1019,33 @@ class CombineTutorial(Node):
 
         # --- Generate Mermaid Diagram ---
         mermaid_lines = ["flowchart TD"]
+        
+        # Helper function to sanitize Mermaid labels
+        def sanitize_mermaid_label(text):
+            """Sanitize text for use in Mermaid diagram labels."""
+            if not text:
+                return ""
+            # Remove or replace problematic characters
+            sanitized = text.replace('"', "'")  # Replace double quotes with single quotes
+            sanitized = sanitized.replace("\n", " ")  # Replace newlines with spaces
+            sanitized = sanitized.replace("\r", " ")  # Replace carriage returns with spaces
+            sanitized = sanitized.replace("\t", " ")  # Replace tabs with spaces
+            sanitized = sanitized.replace("|", "-")  # Replace pipe characters
+            sanitized = sanitized.replace("{", "(").replace("}", ")")  # Replace braces
+            sanitized = sanitized.replace("[", "(").replace("]", ")")  # Replace brackets in content
+            # Collapse multiple spaces into single space
+            while "  " in sanitized:
+                sanitized = sanitized.replace("  ", " ")
+            return sanitized.strip()
+        
         # Add nodes for each abstraction using potentially translated names
         for i, abstr in enumerate(abstractions):
             node_id = f"A{i}"
             # Use potentially translated name, sanitize for Mermaid ID and label
-            sanitized_name = abstr["name"].replace('"', "")
-            node_label = sanitized_name  # Using sanitized name only
+            node_label = sanitize_mermaid_label(abstr["name"])
+            # Ensure label is not empty
+            if not node_label:
+                node_label = f"Abstraction {i}"
             mermaid_lines.append(
                 f'    {node_id}["{node_label}"]'
             )  # Node label uses potentially translated name
@@ -900,14 +1054,16 @@ class CombineTutorial(Node):
             from_node_id = f"A{rel['from']}"
             to_node_id = f"A{rel['to']}"
             # Use potentially translated label, sanitize
-            edge_label = (
-                rel["label"].replace('"', "").replace("\n", " ")
-            )  # Basic sanitization
+            edge_label = sanitize_mermaid_label(rel["label"])
+            # Ensure label is not empty
+            if not edge_label:
+                edge_label = "uses"
             max_label_len = 30
             if len(edge_label) > max_label_len:
                 edge_label = edge_label[: max_label_len - 3] + "..."
+            # Use pipe syntax for edge labels (Mermaid 10.7.0 compatible)
             mermaid_lines.append(
-                f'    {from_node_id} -- "{edge_label}" --> {to_node_id}'
+                f'    {from_node_id} -->|{edge_label}| {to_node_id}'
             )  # Edge label uses potentially translated label
 
         mermaid_diagram = "\n".join(mermaid_lines)
