@@ -329,7 +329,11 @@ For each abstraction, provide:
 List of file indices and paths present in the context:
 {file_listing_for_prompt}
 
-Format the output as a YAML list of dictionaries:
+CRITICAL: You MUST output ONLY valid YAML format. Do NOT include any explanatory text before or after the YAML block. Start directly with the YAML code block.
+
+The output MUST be a YAML list (array) of dictionaries. Each dictionary represents one abstraction.
+
+Format the output as a YAML list of dictionaries (note: it starts with a dash "-"):
 
 ```yaml
 - name: |
@@ -347,15 +351,50 @@ Format the output as a YAML list of dictionaries:
   file_indices:
     - 5 # path/to/another.js
 # ... up to {max_abstraction_num} abstractions
-```"""
+```
+
+IMPORTANT: Output ONLY the YAML block above. Do not add any text before or after it."""
         response = call_llm(prompt, use_cache=(use_cache and self.cur_retry == 0))  # Use cache only if enabled and not retrying
 
         # --- Validation ---
         yaml_str = extract_yaml_from_response(response, "IdentifyAbstractions response")
-        abstractions = yaml.safe_load(yaml_str)
+        try:
+            abstractions = yaml.safe_load(yaml_str)
+        except yaml.YAMLError as e:
+            error_msg = f"Failed to parse YAML from IdentifyAbstractions response.\n"
+            error_msg += f"YAML parsing error: {e}\n"
+            error_msg += f"Extracted YAML string (first 500 chars): {yaml_str[:500]}\n"
+            error_msg += f"Full response (first 1000 chars): {response[:1000]}"
+            raise ValueError(error_msg)
+
+        if abstractions is None:
+            error_msg = f"YAML parsed to None. This usually means the YAML is empty or invalid.\n"
+            error_msg += f"Extracted YAML string: {yaml_str[:500]}\n"
+            error_msg += f"Full response (first 1000 chars): {response[:1000]}"
+            raise ValueError(error_msg)
+
+        # Handle case where YandexGPT might return a dict instead of a list
+        if isinstance(abstractions, dict):
+            # Try to extract a list from common dict keys
+            possible_keys = ['abstractions', 'items', 'list', 'results', 'data']
+            for key in possible_keys:
+                if key in abstractions and isinstance(abstractions[key], list):
+                    print(f"Warning: YandexGPT returned a dict with key '{key}', extracting list from it.")
+                    abstractions = abstractions[key]
+                    break
+            # If still a dict, check if it has a single list value
+            if isinstance(abstractions, dict) and len(abstractions) == 1:
+                first_value = list(abstractions.values())[0]
+                if isinstance(first_value, list):
+                    print(f"Warning: YandexGPT returned a dict with single list value, extracting it.")
+                    abstractions = first_value
 
         if not isinstance(abstractions, list):
-            raise ValueError("LLM Output is not a list")
+            error_msg = f"LLM Output is not a list. Got type: {type(abstractions)}\n"
+            error_msg += f"Parsed value: {abstractions}\n"
+            error_msg += f"Extracted YAML string (first 500 chars): {yaml_str[:500]}\n"
+            error_msg += f"Full response (first 1000 chars): {response[:1000]}"
+            raise ValueError(error_msg)
 
         validated_abstractions = []
         for item in abstractions:

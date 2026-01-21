@@ -39,6 +39,9 @@ def call_llm(prompt: str, use_cache: bool = True) -> str:
         if provider_name == "openai":
             # 128k tokens -> ~512k chars; keep headroom
             return 350_000
+        if provider_name == "yandex":
+            # YandexGPT typically supports 8k-32k tokens; use conservative limit
+            return 300_000
         # Gemini 2.5 models can support very large contexts; keep a high cap
         return 1_200_000
 
@@ -52,6 +55,8 @@ def call_llm(prompt: str, use_cache: bool = True) -> str:
         # Keep per-request payloads well under limits
         if provider_name == "openai":
             return 120_000
+        if provider_name == "yandex":
+            return 50_000
         return 300_000
 
     def summarize_chunks_openai(text: str, client, model: str, max_chars: int) -> str:
@@ -117,6 +122,42 @@ def call_llm(prompt: str, use_cache: bool = True) -> str:
             combined = resp.text.strip()
         return combined
 
+    def summarize_chunks_yandex(text: str, client, model: str, max_chars: int) -> str:
+        """YandexGPT uses OpenAI-compatible API, so we use the same approach as OpenAI."""
+        chunk_size = get_chunk_size_chars("yandex")
+        summaries = []
+        instruction = (
+            "You are a technical documentation assistant. You will compress a large, technical context for downstream analysis.\n"
+            "Requirements:\n"
+            "- Preserve key APIs, function/class names, file paths, and important code lines\n"
+            "- Keep crucial semantics; remove boilerplate and repeated sections\n"
+            "- Output concise plain text (no YAML fences, no explanatory text)\n"
+        )
+        for i in range(0, len(text), chunk_size):
+            chunk = text[i : i + chunk_size]
+            r = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": instruction},
+                    {"role": "user", "content": f"Compress this chunk:\n{chunk}"},
+                ],
+            )
+            summaries.append(r.choices[0].message.content.strip())
+        combined = "\n\n".join(summaries)
+        # Iteratively reduce if still too big
+        reduce_round = 0
+        while len(combined) > max_chars and reduce_round < 3:
+            reduce_round += 1
+            r = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": instruction},
+                    {"role": "user", "content": f"Further compress while preserving technical fidelity:\n{combined}"},
+                ],
+            )
+            combined = r.choices[0].message.content.strip()
+        return combined
+
     # Log the prompt
     logger.info(f"PROMPT: {prompt}")
 
@@ -136,7 +177,7 @@ def call_llm(prompt: str, use_cache: bool = True) -> str:
             logger.info(f"RESPONSE: {cache[prompt]}")
             return cache[prompt]
 
-    # Select provider: "openai" or default to "google"
+    # Select provider: "openai", "yandex", or default to "google"
     provider = os.getenv("LLM_PROVIDER", "google").lower()
     if provider == "openai":
         # OpenAI
@@ -167,6 +208,79 @@ def call_llm(prompt: str, use_cache: bool = True) -> str:
                 r = client.chat.completions.create(
                     model=model,
                     messages=[{"role": "user", "content": effective_prompt}],
+                )
+                response_text = r.choices[0].message.content
+            else:
+                raise
+    elif provider == "yandex":
+        # YandexGPT (OpenAI-compatible API)
+        # Env:
+        #   - YANDEX_API_KEY
+        #   - YANDEX_FOLDER_ID (required)
+        #   - YANDEX_BASE_URL (default: https://llm.api.cloud.yandex.net/v1)
+        #   - YANDEX_MODEL_URI (default: gpt://{folder_id}/yandexgpt/latest)
+        from openai import OpenAI
+        from openai import BadRequestError
+
+        api_key = os.getenv("YANDEX_API_KEY", "")
+        folder_id = os.getenv("YANDEX_FOLDER_ID", "")
+        base_url = os.getenv("YANDEX_BASE_URL", "https://llm.api.cloud.yandex.net/v1")
+        
+        if not api_key:
+            raise ValueError("YANDEX_API_KEY environment variable is required for YandexGPT")
+        if not folder_id:
+            raise ValueError("YANDEX_FOLDER_ID environment variable is required for YandexGPT")
+        
+        # Build model URI if not provided
+        model_uri = os.getenv("YANDEX_MODEL_URI", f"gpt://{folder_id}/yandexgpt/latest")
+        
+        # Initialize OpenAI client with Yandex base URL
+        client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+        )
+        
+        model = model_uri
+        max_chars = get_limit_chars("yandex")
+        effective_prompt = prompt
+        if len(effective_prompt) > max_chars:
+            logger.info(f"Prompt length {len(effective_prompt)} exceeds YandexGPT limit ~{max_chars} chars; compressing...")
+            effective_prompt = summarize_chunks_yandex(effective_prompt, client, model, max_chars)
+        try:
+            # Add system message to enforce structured output for YandexGPT
+            system_message = (
+                "You are a technical documentation assistant. You MUST follow instructions precisely and output "
+                "structured data in the exact format requested (YAML, JSON, etc.). Do not add explanatory text "
+                "outside the requested format. If the instruction asks for a YAML list, output ONLY a valid YAML list "
+                "(array) starting with dashes. If the instruction asks for a YAML dictionary, output ONLY a valid YAML dictionary. "
+                "Never output plain text descriptions instead of structured data."
+            )
+            r = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": effective_prompt}
+                ],
+            )
+            response_text = r.choices[0].message.content
+        except BadRequestError as e:
+            # Fallback if context limit still exceeded due to tokenization overhead
+            if "context length" in str(e).lower() or "token" in str(e).lower():
+                logger.warning("Context length exceeded; applying additional compression and retrying once.")
+                effective_prompt = summarize_chunks_yandex(effective_prompt, client, model, max_chars // 2)
+                system_message = (
+                    "You are a technical documentation assistant. You MUST follow instructions precisely and output "
+                    "structured data in the exact format requested (YAML, JSON, etc.). Do not add explanatory text "
+                    "outside the requested format. If the instruction asks for a YAML list, output ONLY a valid YAML list "
+                    "(array) starting with dashes. If the instruction asks for a YAML dictionary, output ONLY a valid YAML dictionary. "
+                    "Never output plain text descriptions instead of structured data."
+                )
+                r = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": system_message},
+                        {"role": "user", "content": effective_prompt}
+                    ],
                 )
                 response_text = r.choices[0].message.content
             else:
