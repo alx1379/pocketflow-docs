@@ -812,16 +812,24 @@ IMPORTANT: Output ONLY the YAML block. Output exactly {max_abstraction_num} item
         # Validate structure
         validated = []
         for item in final_abstractions:
-            if not isinstance(item, dict) or not all(k in item for k in ["name", "description", "file_indices"]):
+            if not isinstance(item, dict) or not all(k in item for k in ["name", "description"]):
                 continue
             if not isinstance(item["name"], str) or not isinstance(item["description"], str):
                 continue
-            if not isinstance(item["file_indices"], list):
+            # Support both schemas:
+            # - Map phase + internal pipeline uses `files`
+            # - LLM reduce prompt returns `file_indices`
+            raw_indices = None
+            if "file_indices" in item:
+                raw_indices = item.get("file_indices")
+            elif "files" in item:
+                raw_indices = item.get("files")
+            if not isinstance(raw_indices, list):
                 continue
             
             # Normalize indices
             validated_indices = []
-            for idx_entry in item["file_indices"]:
+            for idx_entry in raw_indices:
                 try:
                     if isinstance(idx_entry, int):
                         idx = idx_entry
