@@ -2,7 +2,9 @@ from pocketflow import Flow
 # Import all node classes from nodes.py
 from nodes import (
     FetchRepo,
-    IdentifyAbstractions,
+    IdentifyAbstractions,  # Keep for backward compatibility
+    IdentifyAbstractionsMap,  # Map phase
+    IdentifyAbstractionsReduce,  # Reduce phase
     AnalyzeRelationships,
     OrderChapters,
     WriteChapters,
@@ -14,15 +16,20 @@ def create_tutorial_flow():
 
     # Instantiate nodes
     fetch_repo = FetchRepo()
-    identify_abstractions = IdentifyAbstractions(max_retries=5, wait=20)
+    
+    # Use Map-Reduce pattern for identifying abstractions (handles any number of files)
+    identify_abstractions_map = IdentifyAbstractionsMap(max_retries=3, wait=10)
+    identify_abstractions_reduce = IdentifyAbstractionsReduce(max_retries=5, wait=20)
+    
     analyze_relationships = AnalyzeRelationships(max_retries=5, wait=20)
     order_chapters = OrderChapters(max_retries=5, wait=20)
     write_chapters = WriteChapters(max_retries=5, wait=20) # This is a BatchNode
     combine_tutorial = CombineTutorial()
 
-    # Connect nodes in sequence based on the design
-    fetch_repo >> identify_abstractions
-    identify_abstractions >> analyze_relationships
+    # Connect nodes in sequence
+    fetch_repo >> identify_abstractions_map
+    identify_abstractions_map >> identify_abstractions_reduce
+    identify_abstractions_reduce >> analyze_relationships
     analyze_relationships >> order_chapters
     order_chapters >> write_chapters
     write_chapters >> combine_tutorial

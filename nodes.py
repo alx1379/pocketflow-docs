@@ -451,6 +451,419 @@ IMPORTANT: Output ONLY the YAML block above. Do not add any text before or after
         )
 
 
+class IdentifyAbstractionsMap(BatchNode):
+    """
+    Map phase: Splits files into chunks and identifies abstractions in each chunk.
+    This allows processing repositories of any size by analyzing files in groups.
+    """
+    def prep(self, shared):
+        files_data = shared["files"]
+        project_name = shared["project_name"]
+        language = shared.get("language", "english")
+        use_cache = shared.get("use_cache", True)
+        max_abstraction_num = shared.get("max_abstraction_num", 10)
+        
+        # Get chunk size (files per chunk) - configurable via env var or auto-detect based on provider
+        chunk_size = shared.get("abstraction_chunk_size")
+        if chunk_size is None:
+            # First check if ABSTRACTION_CHUNK_SIZE is set in environment (applies to all providers)
+            env_chunk_size = os.getenv("ABSTRACTION_CHUNK_SIZE")
+            if env_chunk_size:
+                chunk_size = int(env_chunk_size)
+            else:
+                # Auto-detect based on provider if env var not set
+                provider = os.getenv("LLM_PROVIDER", "google").lower()
+                if provider == "yandex":
+                    chunk_size = 30  # Smaller for YandexGPT
+                elif provider == "openai":
+                    chunk_size = 50  # Medium for OpenAI
+                else:  # google/gemini
+                    chunk_size = 100  # Larger for Gemini
+        per_file_max_chars = shared.get("per_file_max_chars", int(os.getenv("PER_FILE_MAX_CHARS", "6000")))
+        
+        # Get project documentation (will be included in each chunk)
+        project_docs = shared.get("project_docs", {})
+        project_docs_content = ""
+        if project_docs:
+            docs_parts = []
+            for doc_name, doc_content in project_docs.items():
+                docs_parts.append(f"=== {doc_name} ===\n{doc_content}\n")
+            project_docs_content = "\n".join(docs_parts)
+        
+        # Split files into chunks
+        chunks = []
+        for i in range(0, len(files_data), chunk_size):
+            chunk = files_data[i:i + chunk_size]
+            chunks.append({
+                "files": chunk,
+                "start_index": i,
+                "project_name": project_name,
+                "language": language,
+                "use_cache": use_cache,
+                "max_abstraction_num": max_abstraction_num,
+                "per_file_max_chars": per_file_max_chars,
+                "project_docs_content": project_docs_content,
+                "total_files": len(files_data),  # Total count for context
+            })
+        
+        print(f"Splitting {len(files_data)} files into {len(chunks)} chunks (chunk size: {chunk_size} files)")
+        return chunks
+    
+    def exec(self, chunk_data):
+        """Process one chunk of files to identify abstractions"""
+        files_chunk = chunk_data["files"]
+        start_index = chunk_data["start_index"]
+        project_name = chunk_data["project_name"]
+        language = chunk_data["language"]
+        use_cache = chunk_data["use_cache"]
+        max_abstraction_num = chunk_data["max_abstraction_num"]
+        per_file_max_chars = chunk_data["per_file_max_chars"]
+        project_docs_content = chunk_data["project_docs_content"]
+        total_files = chunk_data["total_files"]
+        
+        print(f"Processing chunk starting at file {start_index} ({len(files_chunk)} files)...")
+        
+        # Build context for this chunk only
+        context_parts = []
+        file_info = []
+        for local_idx, (path, content) in enumerate(files_chunk):
+            global_index = start_index + local_idx
+            truncated = content if len(content) <= per_file_max_chars else content[:per_file_max_chars]
+            entry = f"--- File Index {global_index}: {path} ---\n{truncated}\n\n"
+            context_parts.append(entry)
+            file_info.append((global_index, path))
+        
+        context = "".join(context_parts)
+        file_listing = "\n".join([f"- {idx} # {path}" for idx, path in file_info])
+        
+        # Language instructions
+        language_instruction = ""
+        name_lang_hint = ""
+        desc_lang_hint = ""
+        if language.lower() != "english":
+            language_instruction = f"IMPORTANT: Generate the `name` and `description` for each abstraction in **{language.capitalize()}** language. Do NOT use English for these fields.\n\n"
+            name_lang_hint = f" (value in {language.capitalize()})"
+            desc_lang_hint = f" (value in {language.capitalize()})"
+        
+        # Project docs section
+        project_docs_section = ""
+        if project_docs_content:
+            project_docs_section = f"""
+Project Documentation Context:
+{project_docs_content}
+
+IMPORTANT: Use terminology and concepts from the project documentation above when identifying abstractions.
+"""
+        
+        # Prompt for this chunk - ask for 3-5 abstractions per chunk
+        abstractions_per_chunk = min(5, max(3, max_abstraction_num // 2))  # 3-5 per chunk
+        
+        prompt = f"""
+For the project `{project_name}`:
+{project_docs_section}
+Codebase Context (subset of files {start_index} to {start_index + len(files_chunk) - 1} out of {total_files} total files):
+{context}
+
+{language_instruction}Analyze this subset of files from the codebase.
+Identify {abstractions_per_chunk} core abstractions present in these specific files.
+
+For each abstraction, provide:
+1. A concise `name`{name_lang_hint}.
+2. A beginner-friendly `description` explaining what it is with a simple analogy, in around 100 words{desc_lang_hint}.
+3. A list of relevant `file_indices` (integers) from the list below using the format `idx # path/comment`.
+
+List of file indices and paths in this subset:
+{file_listing}
+
+CRITICAL: You MUST output ONLY valid YAML format. Do NOT include any explanatory text before or after the YAML block.
+
+The output MUST be a YAML list (array) of dictionaries. Each dictionary represents one abstraction.
+
+Format the output as a YAML list of dictionaries:
+
+```yaml
+- name: |
+    Abstraction Name{name_lang_hint}
+  description: |
+    Description of the abstraction{desc_lang_hint}
+  file_indices:
+    - {start_index} # path/to/file1
+    - {start_index + 1} # path/to/file2
+- name: |
+    Another Abstraction{name_lang_hint}
+  description: |
+    Another description{desc_lang_hint}
+  file_indices:
+    - {start_index + 2} # path/to/file3
+```
+
+IMPORTANT: Output ONLY the YAML block above. Do not add any text before or after it.
+Output exactly {abstractions_per_chunk} abstractions found in these files."""
+        
+        response = call_llm(prompt, use_cache=(use_cache and self.cur_retry == 0))
+        
+        # Validation
+        yaml_str = extract_yaml_from_response(response, f"IdentifyAbstractionsMap chunk {start_index} response")
+        try:
+            abstractions = yaml.safe_load(yaml_str)
+        except yaml.YAMLError as e:
+            error_msg = f"Failed to parse YAML from chunk {start_index}.\n"
+            error_msg += f"YAML parsing error: {e}\n"
+            error_msg += f"Extracted YAML string (first 500 chars): {yaml_str[:500]}"
+            raise ValueError(error_msg)
+        
+        if abstractions is None:
+            raise ValueError(f"YAML parsed to None for chunk {start_index}")
+        
+        # Handle dict case (for YandexGPT)
+        if isinstance(abstractions, dict):
+            possible_keys = ['abstractions', 'items', 'list', 'results', 'data']
+            for key in possible_keys:
+                if key in abstractions and isinstance(abstractions[key], list):
+                    print(f"Warning: Chunk {start_index} returned a dict with key '{key}', extracting list.")
+                    abstractions = abstractions[key]
+                    break
+            if isinstance(abstractions, dict) and len(abstractions) == 1:
+                first_value = list(abstractions.values())[0]
+                if isinstance(first_value, list):
+                    print(f"Warning: Chunk {start_index} returned a dict with single list value, extracting it.")
+                    abstractions = first_value
+        
+        if not isinstance(abstractions, list):
+            error_msg = f"Chunk {start_index} output is not a list. Got type: {type(abstractions)}\n"
+            error_msg += f"Parsed value: {abstractions}"
+            raise ValueError(error_msg)
+        
+        # Validate abstractions structure
+        validated_abstractions = []
+        for item in abstractions:
+            if not isinstance(item, dict) or not all(k in item for k in ["name", "description", "file_indices"]):
+                continue  # Skip invalid items
+            if not isinstance(item["name"], str) or not isinstance(item["description"], str):
+                continue
+            if not isinstance(item["file_indices"], list):
+                continue
+            
+            # Validate and normalize indices
+            validated_indices = []
+            for idx_entry in item["file_indices"]:
+                try:
+                    if isinstance(idx_entry, int):
+                        idx = idx_entry
+                    elif isinstance(idx_entry, str) and "#" in idx_entry:
+                        idx = int(idx_entry.split("#")[0].strip())
+                    else:
+                        idx = int(str(idx_entry).strip())
+                    
+                    # Validate index is in the chunk's range
+                    if start_index <= idx < start_index + len(files_chunk):
+                        validated_indices.append(idx)
+                except (ValueError, TypeError):
+                    continue
+            
+            if validated_indices:
+                validated_abstractions.append({
+                    "name": item["name"],
+                    "description": item["description"],
+                    "files": sorted(list(set(validated_indices))),
+                })
+        
+        print(f"Chunk {start_index}: Found {len(validated_abstractions)} valid abstractions")
+        return {
+            "abstractions": validated_abstractions,
+            "file_range": (start_index, start_index + len(files_chunk) - 1),
+        }
+    
+    def post(self, shared, prep_res, exec_res_list):
+        """Store all partial results from map phase"""
+        shared["partial_abstractions"] = exec_res_list
+        total_abstractions = sum(len(result["abstractions"]) for result in exec_res_list)
+        print(f"Map phase complete: {len(exec_res_list)} chunks processed, {total_abstractions} total abstractions found")
+
+
+class IdentifyAbstractionsReduce(Node):
+    """
+    Reduce phase: Merges abstractions from all chunks, deduplicates, and selects final top N.
+    """
+    def prep(self, shared):
+        partial_results = shared["partial_abstractions"]
+        project_name = shared["project_name"]
+        language = shared.get("language", "english")
+        use_cache = shared.get("use_cache", True)
+        max_abstraction_num = shared.get("max_abstraction_num", 10)
+        
+        # Collect all abstractions from all chunks
+        all_abstractions = []
+        for result in partial_results:
+            all_abstractions.extend(result["abstractions"])
+        
+        print(f"Reduce phase: Merging {len(all_abstractions)} abstractions from {len(partial_results)} chunks")
+        
+        return {
+            "all_abstractions": all_abstractions,
+            "project_name": project_name,
+            "language": language,
+            "use_cache": use_cache,
+            "max_abstraction_num": max_abstraction_num,
+        }
+    
+    def exec(self, prep_res):
+        all_abstractions = prep_res["all_abstractions"]
+        project_name = prep_res["project_name"]
+        language = prep_res["language"]
+        use_cache = prep_res["use_cache"]
+        max_abstraction_num = prep_res["max_abstraction_num"]
+        
+        # Language instructions
+        language_instruction = ""
+        name_lang_hint = ""
+        desc_lang_hint = ""
+        if language.lower() != "english":
+            language_instruction = f"IMPORTANT: Generate the `name` and `description` for each abstraction in **{language.capitalize()}** language. Do NOT use English for these fields.\n\n"
+            name_lang_hint = f" (value in {language.capitalize()})"
+            desc_lang_hint = f" (value in {language.capitalize()})"
+        
+        # If we have too many abstractions, ask LLM to select top N
+        # If we have fewer, that's okay - just deduplicate and return what we have
+        if len(all_abstractions) > max_abstraction_num:
+            print(f"Too many abstractions ({len(all_abstractions)}), selecting top {max_abstraction_num}...")
+        elif len(all_abstractions) < 5:
+            print(f"Warning: Only {len(all_abstractions)} abstractions found across all chunks (expected at least 5). This may indicate the codebase is small or chunks were too small.")
+        
+        if len(all_abstractions) > max_abstraction_num:
+            
+            # Convert to YAML for prompt
+            abstractions_yaml = yaml.dump(all_abstractions, allow_unicode=True, default_flow_style=False)
+            
+            prompt = f"""
+For the project `{project_name}`:
+
+{language_instruction}You have analyzed a large codebase by processing it in chunks and identified {len(all_abstractions)} potential abstractions.
+
+All identified abstractions:
+{abstractions_yaml}
+
+Your task: Select the top {max_abstraction_num} MOST IMPORTANT and DISTINCT abstractions from the list above.
+
+Requirements:
+1. Remove duplicates or very similar abstractions (merge them if needed)
+2. Prioritize core architectural concepts over implementation details
+3. Ensure each abstraction is distinct and meaningful
+4. Preserve the file_indices from the original abstractions (you may combine indices from merged abstractions)
+
+CRITICAL: You MUST output EXACTLY {max_abstraction_num} abstractions. Do not return fewer.
+
+The output MUST be a YAML list (array) of dictionaries. Format:
+
+```yaml
+- name: |
+    Abstraction Name{name_lang_hint}
+  description: |
+    Description{desc_lang_hint}
+  file_indices:
+    - 0 # path/to/file1
+    - 5 # path/to/file2
+- name: |
+    Another Abstraction{name_lang_hint}
+  description: |
+    Another description{desc_lang_hint}
+  file_indices:
+    - 10 # path/to/file3
+# ... exactly {max_abstraction_num} abstractions total
+```
+
+IMPORTANT: Output ONLY the YAML block. Output exactly {max_abstraction_num} items."""
+            
+            response = call_llm(prompt, use_cache=(use_cache and self.cur_retry == 0))
+            yaml_str = extract_yaml_from_response(response, "IdentifyAbstractionsReduce response")
+            
+            try:
+                final_abstractions = yaml.safe_load(yaml_str)
+            except yaml.YAMLError as e:
+                error_msg = f"Failed to parse YAML from Reduce response.\n"
+                error_msg += f"YAML parsing error: {e}\n"
+                error_msg += f"Extracted YAML string (first 500 chars): {yaml_str[:500]}"
+                raise ValueError(error_msg)
+            
+            if final_abstractions is None:
+                raise ValueError("YAML parsed to None in Reduce phase")
+            
+            # Handle dict case
+            if isinstance(final_abstractions, dict):
+                possible_keys = ['abstractions', 'items', 'list', 'results', 'data']
+                for key in possible_keys:
+                    if key in final_abstractions and isinstance(final_abstractions[key], list):
+                        final_abstractions = final_abstractions[key]
+                        break
+                if isinstance(final_abstractions, dict) and len(final_abstractions) == 1:
+                    first_value = list(final_abstractions.values())[0]
+                    if isinstance(first_value, list):
+                        final_abstractions = first_value
+        else:
+            # Simple deduplication if we have fewer abstractions
+            final_abstractions = self._deduplicate_abstractions(all_abstractions)
+        
+        # Validate final abstractions
+        if not isinstance(final_abstractions, list):
+            error_msg = f"Reduce output is not a list. Got type: {type(final_abstractions)}\n"
+            error_msg += f"Value: {final_abstractions}"
+            raise ValueError(error_msg)
+        
+        # Validate structure
+        validated = []
+        for item in final_abstractions:
+            if not isinstance(item, dict) or not all(k in item for k in ["name", "description", "file_indices"]):
+                continue
+            if not isinstance(item["name"], str) or not isinstance(item["description"], str):
+                continue
+            if not isinstance(item["file_indices"], list):
+                continue
+            
+            # Normalize indices
+            validated_indices = []
+            for idx_entry in item["file_indices"]:
+                try:
+                    if isinstance(idx_entry, int):
+                        idx = idx_entry
+                    elif isinstance(idx_entry, str) and "#" in idx_entry:
+                        idx = int(idx_entry.split("#")[0].strip())
+                    else:
+                        idx = int(str(idx_entry).strip())
+                    validated_indices.append(idx)
+                except (ValueError, TypeError):
+                    continue
+            
+            if validated_indices:
+                validated.append({
+                    "name": item["name"],
+                    "description": item["description"],
+                    "files": sorted(list(set(validated_indices))),
+                })
+        
+        print(f"Reduce phase complete: Selected {len(validated)} final abstractions")
+        return validated
+    
+    def _deduplicate_abstractions(self, abstractions):
+        """Simple deduplication by name similarity"""
+        seen_names = set()
+        unique = []
+        for abstr in abstractions:
+            name_lower = abstr.get("name", "").lower().strip()
+            # Check for similar names (simple approach)
+            is_duplicate = False
+            for seen in seen_names:
+                if name_lower == seen or name_lower in seen or seen in name_lower:
+                    is_duplicate = True
+                    break
+            if not is_duplicate and name_lower:
+                seen_names.add(name_lower)
+                unique.append(abstr)
+        return unique
+    
+    def post(self, shared, prep_res, exec_res):
+        shared["abstractions"] = exec_res
+
+
 class AnalyzeRelationships(Node):
     def prep(self, shared):
         abstractions = shared[

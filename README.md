@@ -1,7 +1,3 @@
-python main.py --dir ../../TIBURON/ml-back/app --include "*.py" --exclude "*test*" --language "Russian"
-
-python main.py --dir ../../TIBURON/ml-front/src --include "*.*" --language "Russian"
-
 <h1 align="center">Turns Codebase into Easy Tutorial with AI</h1>
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
@@ -90,20 +86,73 @@ This is a tutorial project of [Pocket Flow](https://github.com/The-Pocket/Pocket
    pip install -r requirements.txt
    ```
 
-4. Set up LLM in [`utils/call_llm.py`](./utils/call_llm.py) by providing credentials. By default, you can use the [AI Studio key](https://aistudio.google.com/app/apikey) with this client for Gemini Pro 2.5:
+4. Set up LLM provider and API credentials:
 
-   ```python
-   client = genai.Client(
-     api_key=os.getenv("GEMINI_API_KEY", "your-api_key"),
-   )
+   The tool supports three LLM providers: **Google Gemini**, **OpenAI**, and **YandexGPT**. Configure your preferred provider using environment variables.
+
+   **Option A: Google Gemini (Default)**
+   
+   Get your API key from [Google AI Studio](https://aistudio.google.com/app/apikey) and set:
+   ```bash
+   export GEMINI_API_KEY="your-gemini-api-key"
+   # Optional: explicitly set provider (default is "google")
+   export LLM_PROVIDER="google"
    ```
 
-   You can use your own models. We highly recommend the latest models with thinking capabilities (Claude 3.7 with thinking, O1). You can verify that it is correctly set up by running:
+   **Option B: OpenAI**
+   
+   Get your API key from [OpenAI Platform](https://platform.openai.com/api-keys) and set:
+   ```bash
+   export OPENAI_API_KEY="your-openai-api-key"
+   export LLM_PROVIDER="openai"
+   # Optional: specify model (default: "gpt-4o-mini")
+   export OPENAI_MODEL="gpt-4o-mini"
+   ```
+
+   **Option C: YandexGPT**
+   
+   Get your API key and folder ID from [Yandex Cloud](https://cloud.yandex.com/docs/foundation-models/concepts/authentication) and set:
+   ```bash
+   export YANDEX_API_KEY="your-yandex-api-key"
+   export YANDEX_FOLDER_ID="your-folder-id"
+   export LLM_PROVIDER="yandex"
+   # Optional: customize base URL and model URI
+   export YANDEX_BASE_URL="https://llm.api.cloud.yandex.net/v1"
+   export YANDEX_MODEL_URI="gpt://your-folder-id/yandexgpt/latest"
+   ```
+
+   You can verify that it is correctly set up by running:
    ```bash
    python utils/call_llm.py
    ```
 
-5. Generate a complete codebase tutorial by running the main script:
+5. (Optional) Configure additional environment variables for fine-tuning:
+   
+   Create a `.env` file in the project root or set environment variables:
+   ```bash
+   # LLM Provider Selection (google, openai, yandex)
+   LLM_PROVIDER=google
+   
+   # Number of files per chunk in Map-Reduce abstraction identification
+   # If not set, auto-detects based on provider:
+   #   - YandexGPT: 30 files
+   #   - OpenAI: 50 files  
+   #   - Gemini: 100 files
+   ABSTRACTION_CHUNK_SIZE=50
+   
+   # Context limits (optional, defaults are provider-specific)
+   LLM_MAX_PROMPT_CHARS=1000000
+   LLM_CHUNK_SIZE_CHARS=200000
+   CONTEXT_MAX_CHARS=500000
+   PER_FILE_MAX_CHARS=6000
+   REL_CONTEXT_MAX_CHARS=300000
+   CHAPTER_CONTEXT_MAX_CHARS=200000
+   
+   # GitHub Token (for private repos or to avoid rate limits)
+   GITHUB_TOKEN=your_github_token
+   ```
+
+6. Generate a complete codebase tutorial by running the main script:
     ```bash
     # Analyze a GitHub repository
     python main.py --repo https://github.com/username/repo --include "*.py" "*.js" --exclude "tests/*" --max-size 50000
@@ -125,6 +174,7 @@ This is a tutorial project of [Pocket Flow](https://github.com/The-Pocket/Pocket
     - `--language` - Language for the generated tutorial (default: "english")
     - `--max-abstractions` - Maximum number of abstractions to identify (default: 10)
     - `--no-cache` - Disable LLM response caching (default: caching enabled)
+    - `--abstraction-chunk-size` - Number of files per chunk in Map-Reduce abstraction identification (default: auto-detect based on provider, or set `ABSTRACTION_CHUNK_SIZE` env var)
 
 The application will crawl the repository, analyze the codebase structure, generate tutorial content in the specified language, and save the output in the specified directory (default: ./output).
 
@@ -142,15 +192,41 @@ To run this project in a Docker container, you'll need to pass your API keys as 
 
 2. Run the container
 
-   You'll need to provide your `GEMINI_API_KEY` for the LLM to function. If you're analyzing private GitHub repositories or want to avoid rate limits, also provide your `GITHUB_TOKEN`.
+   You'll need to provide API credentials for your chosen LLM provider. If you're analyzing private GitHub repositories or want to avoid rate limits, also provide your `GITHUB_TOKEN`.
    
    Mount a local directory to `/app/output` inside the container to access the generated tutorials on your host machine.
    
-   **Example for analyzing a public GitHub repository:**
+   **Example with Google Gemini:**
    
    ```bash
    docker run -it --rm \
+     -e LLM_PROVIDER="google" \
      -e GEMINI_API_KEY="YOUR_GEMINI_API_KEY_HERE" \
+     -e GITHUB_TOKEN="YOUR_GITHUB_TOKEN" \
+     -v "$(pwd)/output_tutorials":/app/output \
+     pocketflow-app --repo https://github.com/username/repo
+   ```
+   
+   **Example with OpenAI:**
+   
+   ```bash
+   docker run -it --rm \
+     -e LLM_PROVIDER="openai" \
+     -e OPENAI_API_KEY="YOUR_OPENAI_API_KEY_HERE" \
+     -e OPENAI_MODEL="gpt-4o-mini" \
+     -e GITHUB_TOKEN="YOUR_GITHUB_TOKEN" \
+     -v "$(pwd)/output_tutorials":/app/output \
+     pocketflow-app --repo https://github.com/username/repo
+   ```
+   
+   **Example with YandexGPT:**
+   
+   ```bash
+   docker run -it --rm \
+     -e LLM_PROVIDER="yandex" \
+     -e YANDEX_API_KEY="YOUR_YANDEX_API_KEY_HERE" \
+     -e YANDEX_FOLDER_ID="YOUR_FOLDER_ID_HERE" \
+     -e GITHUB_TOKEN="YOUR_GITHUB_TOKEN" \
      -v "$(pwd)/output_tutorials":/app/output \
      pocketflow-app --repo https://github.com/username/repo
    ```
@@ -159,6 +235,7 @@ To run this project in a Docker container, you'll need to pass your API keys as 
    
    ```bash
    docker run -it --rm \
+     -e LLM_PROVIDER="google" \
      -e GEMINI_API_KEY="YOUR_GEMINI_API_KEY_HERE" \
      -v "/path/to/your/local_codebase":/app/code_to_analyze \
      -v "$(pwd)/output_tutorials":/app/output \
