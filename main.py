@@ -37,15 +37,15 @@ DEFAULT_EXCLUDE_PATTERNS = {
 
 # --- Main Function ---
 def main():
-    parser = argparse.ArgumentParser(description="Generate a tutorial for a GitHub codebase or local directory.")
+    parser = argparse.ArgumentParser(description="Generate a tutorial for a GitHub/GitLab codebase or local directory.")
 
     # Create mutually exclusive group for source
     source_group = parser.add_mutually_exclusive_group(required=True)
-    source_group.add_argument("--repo", help="URL of the public GitHub repository.")
+    source_group.add_argument("--repo", help="URL of the GitHub or GitLab repository.")
     source_group.add_argument("--dir", help="Path to local directory.")
 
     parser.add_argument("-n", "--name", help="Project name (optional, derived from repo/directory if omitted).")
-    parser.add_argument("-t", "--token", help="GitHub personal access token (optional, reads from GITHUB_TOKEN env var if not provided).")
+    parser.add_argument("-t", "--token", help="GitHub or GitLab personal access token (optional; uses GITHUB_TOKEN or GITLAB_TOKEN env var depending on repo URL).")
     parser.add_argument("-o", "--output", default="output", help="Base directory for output (default: ./output).")
     parser.add_argument("-i", "--include", nargs="+", help="Include file patterns (e.g. '*.py' '*.js'). Defaults to common code files if not specified.")
     parser.add_argument("-e", "--exclude", nargs="+", help="Exclude file patterns (e.g. 'tests/*' 'docs/*'). Defaults to test/build directories if not specified.")
@@ -61,12 +61,18 @@ def main():
 
     args = parser.parse_args()
 
-    # Get GitHub token from argument or environment variable if using repo
+    # Get GitHub or GitLab token from argument or environment variable if using repo
     github_token = None
+    gitlab_token = None
     if args.repo:
-        github_token = args.token or os.environ.get('GITHUB_TOKEN')
-        if not github_token:
-            print("Warning: No GitHub token provided. You might hit rate limits for public repositories.")
+        if "gitlab" in args.repo.lower():
+            gitlab_token = args.token or os.environ.get("GITLAB_TOKEN")
+            if not gitlab_token:
+                print("Warning: No GitLab token provided. Private repos and high API usage may require GITLAB_TOKEN.")
+        else:
+            github_token = args.token or os.environ.get("GITHUB_TOKEN")
+            if not github_token:
+                print("Warning: No GitHub token provided. You might hit rate limits for public repositories.")
 
     # Initialize the shared dictionary with inputs
     shared = {
@@ -74,6 +80,7 @@ def main():
         "local_dir": args.dir,
         "project_name": args.name, # Can be None, FetchRepo will derive it
         "github_token": github_token,
+        "gitlab_token": gitlab_token,
         "output_dir": args.output, # Base directory for CombineTutorial output
 
         # Add include/exclude patterns and max file size

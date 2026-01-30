@@ -150,12 +150,19 @@ This is a tutorial project of [Pocket Flow](https://github.com/The-Pocket/Pocket
    
    # GitHub Token (for private repos or to avoid rate limits)
    GITHUB_TOKEN=your_github_token
+   
+   # GitLab Token (for GitLab repos; private repos or higher API limits)
+   GITLAB_TOKEN=your_gitlab_token
    ```
 
 6. Generate a complete codebase tutorial by running the main script:
     ```bash
     # Analyze a GitHub repository
     python main.py --repo https://github.com/username/repo --include "*.py" "*.js" --exclude "tests/*" --max-size 50000
+
+    # Analyze a GitLab repository
+    python main.py --repo https://gitlab.com/group/project --include "*.py" "*.md"
+    # Or with a specific branch: https://gitlab.com/group/project/-/tree/main
 
     # Or, analyze a local directory
     python main.py --dir /path/to/your/codebase --include "*.py" --exclude "*test*"
@@ -164,9 +171,9 @@ This is a tutorial project of [Pocket Flow](https://github.com/The-Pocket/Pocket
     python main.py --repo https://github.com/username/repo --language "Chinese"
     ```
 
-    - `--repo` or `--dir` - Specify either a GitHub repo URL or a local directory path (required, mutually exclusive)
+    - `--repo` or `--dir` - Specify either a GitHub/GitLab repo URL or a local directory path (required, mutually exclusive)
     - `-n, --name` - Project name (optional, derived from URL/directory if omitted)
-    - `-t, --token` - GitHub token (or set GITHUB_TOKEN environment variable)
+    - `-t, --token` - GitHub or GitLab personal access token (or set GITHUB_TOKEN / GITLAB_TOKEN depending on repo)
     - `-o, --output` - Output directory (default: ./output)
     - `-i, --include` - Files to include (e.g., "`*.py`" "`*.js`")
     - `-e, --exclude` - Files to exclude (e.g., "`tests/*`" "`docs/*`")
@@ -192,7 +199,7 @@ To run this project in a Docker container, you'll need to pass your API keys as 
 
 2. Run the container
 
-   You'll need to provide API credentials for your chosen LLM provider. If you're analyzing private GitHub repositories or want to avoid rate limits, also provide your `GITHUB_TOKEN`.
+   You'll need to provide API credentials for your chosen LLM provider. For GitHub repos, provide `GITHUB_TOKEN` (for private repos or to avoid rate limits). For GitLab repos, provide `GITLAB_TOKEN` instead.
    
    Mount a local directory to `/app/output` inside the container to access the generated tutorials on your host machine.
    
@@ -229,6 +236,17 @@ To run this project in a Docker container, you'll need to pass your API keys as 
      -e GITHUB_TOKEN="YOUR_GITHUB_TOKEN" \
      -v "$(pwd)/output_tutorials":/app/output \
      pocketflow-app --repo https://github.com/username/repo
+   ```
+   
+   **Example for a GitLab repository:**
+   
+   ```bash
+   docker run -it --rm \
+     -e LLM_PROVIDER="google" \
+     -e GEMINI_API_KEY="YOUR_GEMINI_API_KEY_HERE" \
+     -e GITLAB_TOKEN="YOUR_GITLAB_TOKEN" \
+     -v "$(pwd)/output_tutorials":/app/output \
+     pocketflow-app --repo https://gitlab.com/group/project
    ```
    
    **Example for analyzing a local directory:**

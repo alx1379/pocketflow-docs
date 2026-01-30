@@ -3,6 +3,7 @@ import re
 import yaml
 from pocketflow import Node, BatchNode
 from utils.crawl_github_files import crawl_github_files
+from utils.crawl_gitlab_files import crawl_gitlab_files
 from utils.call_llm import call_llm
 from utils.crawl_local_files import crawl_local_files
 
@@ -160,10 +161,17 @@ class FetchRepo(Node):
         exclude_patterns = shared["exclude_patterns"]
         max_file_size = shared["max_file_size"]
 
+        # Use GitLab or GitHub token depending on repo URL
+        token = (
+            shared.get("gitlab_token")
+            if (repo_url and "gitlab" in repo_url.lower())
+            else shared.get("github_token")
+        )
+
         return {
             "repo_url": repo_url,
             "local_dir": local_dir,
-            "token": shared.get("github_token"),
+            "token": token,
             "include_patterns": include_patterns,
             "exclude_patterns": exclude_patterns,
             "max_file_size": max_file_size,
@@ -172,15 +180,26 @@ class FetchRepo(Node):
 
     def exec(self, prep_res):
         if prep_res["repo_url"]:
-            print(f"Crawling repository: {prep_res['repo_url']}...")
-            result = crawl_github_files(
-                repo_url=prep_res["repo_url"],
-                token=prep_res["token"],
-                include_patterns=prep_res["include_patterns"],
-                exclude_patterns=prep_res["exclude_patterns"],
-                max_file_size=prep_res["max_file_size"],
-                use_relative_paths=prep_res["use_relative_paths"],
-            )
+            repo_url = prep_res["repo_url"]
+            print(f"Crawling repository: {repo_url}...")
+            if "gitlab" in repo_url.lower():
+                result = crawl_gitlab_files(
+                    repo_url=repo_url,
+                    token=prep_res["token"],
+                    include_patterns=prep_res["include_patterns"],
+                    exclude_patterns=prep_res["exclude_patterns"],
+                    max_file_size=prep_res["max_file_size"],
+                    use_relative_paths=prep_res["use_relative_paths"],
+                )
+            else:
+                result = crawl_github_files(
+                    repo_url=repo_url,
+                    token=prep_res["token"],
+                    include_patterns=prep_res["include_patterns"],
+                    exclude_patterns=prep_res["exclude_patterns"],
+                    max_file_size=prep_res["max_file_size"],
+                    use_relative_paths=prep_res["use_relative_paths"],
+                )
         else:
             print(f"Crawling directory: {prep_res['local_dir']}...")
 
